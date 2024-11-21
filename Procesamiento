@@ -1,0 +1,122 @@
+import streamlit as st
+import pandas as pd
+from io import BytesIO
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.neighbors import NearestNeighbors
+
+# Cargar datos de Ramedicas
+@st.cache_data
+def load_ramedicas_data():
+    ramedicas_url = (
+        "https://docs.google.com/spreadsheets/d/1Y9SgliayP_J5Vi2SdtZmGxKWwf1iY7ma/export?format=xlsx&sheet=Hoja1"
+    )
+    ramedicas_df = pd.read_excel(ramedicas_url, sheet_name="Hoja1")
+    return ramedicas_df[['codart', 'nomart']]
+
+# Preprocesar nombres
+def preprocess_name(name):
+    replacements = {
+        "(": "", ")": "", "+": " ", "/": " ", "-": " ", ",": "", ";": "",
+        ".": "", "mg": " mg", "ml": " ml", "capsula": " capsulas",
+        "tablet": " tableta", "tableta": " tableta", "parches": " parche", "parche": " parche"
+    }
+    for old, new in replacements.items():
+        name = name.lower().replace(old, new)
+    stopwords = {"de", "el", "la", "los", "las", "un", "una", "y", "en", "por"}
+    words = [word for word in name.split() if word not in stopwords]
+    return " ".join(sorted(words))
+
+# Encontrar mejores coincidencias usando TF-IDF y similitud coseno
+def find_best_matches(client_names, ramedicas_df):
+    # Preprocesar nombres
+    ramedicas_df['processed_nomart'] = ramedicas_df['nomart'].apply(preprocess_name)
+    client_names_processed = [preprocess_name(name) for name in client_names]
+
+    # Vectorizar con TF-IDF
+    vectorizer = TfidfVectorizer()
+    tfidf_ramedicas = vectorizer.fit_transform(ramedicas_df['processed_nomart'])
+    tfidf_clients = vectorizer.transform(client_names_processed)
+
+    # Modelo Nearest Neighbors (Similitud Coseno)
+    nn = NearestNeighbors(n_neighbors=1, metric='cosine').fit(tfidf_ramedicas)
+    distances, indices = nn.kneighbors(tfidf_clients)
+
+    # Crear resultados
+    results = []
+    for i, (distance, index) in enumerate(zip(distances.flatten(), indices.flatten())):
+        match = ramedicas_df.iloc[index]
+        score = round((1 - distance) * 100, 2)  # Convertir distancia a similitud
+        results.append({
+            'nombre_cliente': client_names[i],
+            'nombre_ramedicas': match['nomart'],
+            'codart': match['codart'],
+            'score': score
+        })
+    return results
+
+# Convertir DataFrame a archivo Excel
+def to_excel(df):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="Homologación")
+    return output.getvalue()
+
+# Interfaz de Streamlit
+st.markdown(
+    """
+    <h1 style="text-align: center; color: #FF5800; font-family: Arial, sans-serif;">
+        RAMEDICAS S.A.S.
+    </h1>
+    <h3 style="text-align: center; font-family: Arial, sans-serif; color: #3A86FF;">
+        Homologador de Productos por Nombre
+    </h3>
+    <p style="text-align: center; font-family: Arial, sans-serif; color: #6B6B6B;">
+        Esta herramienta utiliza técnicas avanzadas para encontrar coincidencias de productos.
+    </p>
+    """,
+    unsafe_allow_html=True
+)
+
+# Botón para actualizar la base de datos
+if st.button("Actualizar base de datos"):
+    st.cache_data.clear()
+
+# Cargar nombres del cliente (manual o archivo)
+uploaded_file = st.file_uploader("Sube tu archivo Excel con la columna 'nombre':", type="xlsx")
+client_names_manual = st.text_area("Ingresa los nombres de los productos del cliente (uno por línea):")
+
+ramedicas_df = load_ramedicas_data()
+
+if uploaded_file:
+    client_names_df = pd.read_excel(uploaded_file)
+    if 'nombre' not in client_names_df.columns:
+        st.error("El archivo debe tener una columna llamada 'nombre'.")
+    else:
+        client_names = client_names_df['nombre'].tolist()
+        results = find_best_matches(client_names, ramedicas_df)
+        results_df = pd.DataFrame(results)
+        st.dataframe(results_df)
+
+        # Descargar resultados
+        excel_data = to_excel(results_df)
+        st.download_button(
+            label="📥 Descargar resultados en Excel",
+            data=excel_data,
+            file_name="homologacion_resultados.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+if client_names_manual:
+    client_names = client_names_manual.split("\n")
+    results = find_best_matches(client_names, ramedicas_df)
+    results_df = pd.DataFrame(results)
+    st.dataframe(results_df)
+
+    # Descargar resultados
+    excel_data = to_excel(results_df)
+    st.download_button(
+        label="📥 Descargar resultados en Excel",
+        data=excel_data,
+        file_name="homologacion_resultados.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
